@@ -30,11 +30,15 @@ func mustTag(repo string, tag string) name.Tag {
 	return ref
 }
 
+// TestPusherNeedsTargets verifies that PushToOciRegistries returns an error
+// when no target registry tags are provided in the push options.
 func TestPusherNeedsTargets(t *testing.T) {
 	err := PushToOciRegistries(&PushOptions{})
 	require.ErrorContains(t, err, "At least one target is required.")
 }
 
+// TestPusherAllowsNilKustomization verifies that a push succeeds when no
+// kustomization file is present — allowing raw directories to be published.
 func TestPusherAllowsNilKustomization(t *testing.T) {
 	address, _ := createRegistry(t, "", "", false)
 	createDockerConfig(t, address, "", "")
@@ -53,6 +57,8 @@ func TestPusherAllowsNilKustomization(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestPusherNeedsNonEmptyKustomization verifies that pushing fails when a
+// kustomization is provided but has no meaningful content (all fields empty).
 func TestPusherNeedsNonEmptyKustomization(t *testing.T) {
 	pushOptions := PushOptions{
 		kustomization: &types.Kustomization{},
@@ -63,6 +69,9 @@ func TestPusherNeedsNonEmptyKustomization(t *testing.T) {
 	require.ErrorContains(t, err, "kustomization.yaml is empty")
 }
 
+// TestPusherNeedsValidMetaIfSet verifies that pushing fails when the kustomization
+// has invalid TypeMeta (e.g. wrong APIVersion, invalid Kind). Tests multiple
+// combinations of bad metadata fields.
 func TestPusherNeedsValidMetaIfSet(t *testing.T) {
 	badData := map[string]types.TypeMeta{
 		"nonempty_version": {
@@ -97,6 +106,8 @@ func TestPusherNeedsValidMetaIfSet(t *testing.T) {
 	}
 }
 
+// TestLogsDeprecatedFields verifies that deprecation warnings are logged when
+// the kustomization uses deprecated fields like commonLabels and vars.
 func TestLogsDeprecatedFields(t *testing.T) {
 	dummy, _, _ := loctest.PrepareFs(t, []string{}, map[string]string{})
 
@@ -121,6 +132,10 @@ func TestLogsDeprecatedFields(t *testing.T) {
 	require.Contains(t, buf.String(), "Warning: 'vars' is deprecated.")
 }
 
+// TestKustomizationFilePathsMustBeLocalToDirectory verifies that pushing fails when
+// any kustomization field (resources, components, patches, generators, etc.) references
+// a path outside the kustomization directory (e.g. ".."). This prevents publishing
+// artifacts that depend on files outside the bundle.
 func TestKustomizationFilePathsMustBeLocalToDirectory(t *testing.T) {
 	fields := map[string]struct {
 		fieldName string
@@ -273,6 +288,8 @@ func TestKustomizationFilePathsMustBeLocalToDirectory(t *testing.T) {
 	}
 }
 
+// TestUntrustedCertificate verifies that pushing to a registry with a self-signed
+// TLS certificate fails with a certificate verification error when no CA is configured.
 func TestUntrustedCertificate(t *testing.T) {
 	username := "username"
 	password := "password"
@@ -300,6 +317,8 @@ func TestUntrustedCertificate(t *testing.T) {
 	require.ErrorContains(t, err, "tls: failed to verify certificate: x509: certificate signed by unknown authority")
 }
 
+// TestNoCredentialFile verifies that pushing to a registry that requires
+// authentication fails with 401 Unauthorized when no Docker credentials are configured.
 func TestNoCredentialFile(t *testing.T) {
 	username := "username"
 	password := "password"
@@ -327,6 +346,8 @@ func TestNoCredentialFile(t *testing.T) {
 	require.ErrorContains(t, err, "401 Unauthorized")
 }
 
+// TestInvalidCredentials verifies that pushing fails with 401 Unauthorized when
+// the Docker config contains incorrect username/password for the target registry.
 func TestInvalidCredentials(t *testing.T) {
 	address, caCert := createRegistry(t, "expectedusername", "expectedpassword", true)
 	createDockerConfig(t, address, "actualusername", "actualpassword")
@@ -352,6 +373,8 @@ func TestInvalidCredentials(t *testing.T) {
 	require.ErrorContains(t, err, "401 Unauthorized")
 }
 
+// TestPush verifies the happy path: pushing a valid kustomization to an
+// authenticated TLS registry succeeds without error.
 func TestPush(t *testing.T) {
 	username := "username"
 	password := "password"
@@ -380,6 +403,8 @@ func TestPush(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestPushSetsAnnotations verifies that OCI manifest annotations (source, revision,
+// created timestamp) are correctly set on the pushed image manifest when configured.
 func TestPushSetsAnnotations(t *testing.T) {
 	username := "username"
 	password := "password"
@@ -420,6 +445,9 @@ func TestPushSetsAnnotations(t *testing.T) {
 	require.Equal(t, "abc123def", manifest.Annotations["org.opencontainers.image.revision"])
 }
 
+// TestPushExcludesFilesMatchingKustomizeignore verifies that files matching patterns
+// in .kustomizeignore are excluded from the pushed artifact. Also verifies that
+// .kustomizeignore itself is excluded from the artifact.
 func TestPushExcludesFilesMatchingKustomizeignore(t *testing.T) {
 	address, _ := createRegistry(t, "", "", false)
 	createDockerConfig(t, address, "", "")
@@ -461,6 +489,8 @@ func TestPushExcludesFilesMatchingKustomizeignore(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(repoSpec.Dir.String(), ".kustomizeignore"))
 }
 
+// TestPushExcludesFilesWithExcludeFlag verifies that files matching patterns
+// provided via the --exclude flag are excluded from the pushed artifact.
 func TestPushExcludesFilesWithExcludeFlag(t *testing.T) {
 	address, _ := createRegistry(t, "", "", false)
 	createDockerConfig(t, address, "", "")
