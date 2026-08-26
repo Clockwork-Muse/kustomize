@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"sigs.k8s.io/kustomize/kyaml/errors"
@@ -22,15 +21,9 @@ import (
 const notPulled = filesys.ConfirmedDir("/notPulled")
 
 // RepoSpec specifies an OCI repository and a tag
-// TODO: and path therein?
 type RepoSpec struct {
 	// Raw, original spec, used to look for cycles.
-	// TODO(monopole): Drop raw, use processed fields instead.
 	raw string
-
-	tag string
-
-	digest string
 
 	// Dir is where the manifest is pulled to.
 	Dir filesys.ConfirmedDir
@@ -42,12 +35,12 @@ type RepoSpec struct {
 	// to a Kustomization.
 	KustRootPath string
 
-	// Timeout is the maximum duration allowed for execing git commands.
-	Timeout time.Duration
+	// SemverConstraint is set when the tag is a semver range (e.g., ">=1.0.0").
+	// When set, the puller resolves the highest matching tag from the registry.
+	SemverConstraint string
 }
 
-// RepoSpec returns a string suitable for pulling with tools like oras.land, eg "oras pull {spec}".
-// Note that this doesn't work with oci-layout hosts, as it requires a separate cli flag.
+// PullSpec returns the OCI reference string suitable for pulling.
 func (x *RepoSpec) PullSpec() string {
 	return x.Reference.String()
 }
@@ -86,7 +79,7 @@ const (
 // elements Kustomize uses for other purposes (e.g. query params that turn into args, and
 // the path to the kustomization root within the repo).
 func NewRepoSpecFromURL(n string) (*RepoSpec, error) {
-	repoSpec := &RepoSpec{raw: n, Dir: notPulled, Timeout: defaultTimeout}
+	repoSpec := &RepoSpec{raw: n, Dir: notPulled}
 
 	n, err := trimScheme(n)
 	if err != nil {
@@ -98,10 +91,20 @@ func NewRepoSpecFromURL(n string) (*RepoSpec, error) {
 		return nil, err
 	}
 
-	repoSpec.Reference, err = name.ParseReference(n,
-		name.WithDefaultRegistry(""),
-		name.WithDefaultTag("latest"),
-	)
+	// Check if the tag portion is a semver constraint (contains range chars)
+	if constraint, repo, ok := extractSemverConstraint(n); ok {
+		repoSpec.SemverConstraint = constraint
+		// Parse reference without the constraint tag (use repo as-is)
+		repoSpec.Reference, err = name.ParseReference(repo,
+			name.WithDefaultRegistry(""),
+			name.WithDefaultTag("latest"),
+		)
+	} else {
+		repoSpec.Reference, err = name.ParseReference(n,
+			name.WithDefaultRegistry(""),
+			name.WithDefaultTag("latest"),
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -112,18 +115,18 @@ func NewRepoSpecFromURL(n string) (*RepoSpec, error) {
 	return repoSpec, nil
 }
 
-func extractRoot(n string) (string, string, error) {
+func extractRoot(n string) (kustRoot string, rest string, err error) {
 	if rootIndex := strings.LastIndex(n, rootSeparator); rootIndex >= 0 {
-		root := n[rootIndex+len(rootSeparator):]
+		kustRoot = n[rootIndex+len(rootSeparator):]
 
-		if root == "" {
+		if kustRoot == "" {
 			return "", "", errors.Errorf("failed to parse root path segment")
 		}
-		if kustRootPathExitsRepo(root) {
+		if kustRootPathExitsRepo(kustRoot) {
 			return "", "", errors.Errorf("root path exits repo")
 		}
 
-		return root, n[:rootIndex], nil
+		return kustRoot, n[:rootIndex], nil
 	}
 
 	return "", n, nil
@@ -136,12 +139,43 @@ func kustRootPathExitsRepo(kustRootPath string) bool {
 		pathElements[0] == filesys.ParentDir
 }
 
-// Arbitrary, but non-infinite, timeout for running commands.
-const defaultTimeout = 27 * time.Second
-
 const ociScheme = "oci://"
 
-func trimScheme(s string) (string, error) {
+// semverRangeChars are characters that indicate a tag is a semver constraint rather than a literal tag.
+const semverRangeChars = "><=~^|*x "
+
+// extractSemverConstraint checks if the reference string has a tag portion that looks like a
+// semver constraint (e.g., ">=1.0.0 <2.0.0"). If so, it returns the constraint and the
+// repository portion without the tag. Returns ok=false if no constraint detected.
+func extractSemverConstraint(ref string) (constraint string, repo string, ok bool) {
+	// Find the last colon that separates repo from tag
+	// But not if it's part of a port (host:port/repo) — those come before the first /
+	lastColon := strings.LastIndex(ref, ":")
+	if lastColon < 0 {
+		return "", "", false
+	}
+
+	// Make sure the colon is after the first slash (so it's a tag, not a port)
+	firstSlash := strings.Index(ref, "/")
+	if firstSlash >= 0 && lastColon < firstSlash {
+		return "", "", false
+	}
+
+	tag := ref[lastColon+1:]
+	if !isSemverConstraint(tag) {
+		return "", "", false
+	}
+
+	return tag, ref[:lastColon], true
+}
+
+// isSemverConstraint returns true if the tag contains characters indicating
+// it's a semver range/constraint rather than a literal version tag.
+func isSemverConstraint(tag string) bool {
+	return strings.ContainsAny(tag, semverRangeChars)
+}
+
+func trimScheme(s string) (rest string, err error) {
 	if len(ociScheme) <= len(s) && strings.ToLower(s[:len(ociScheme)]) == ociScheme {
 		return s[len(ociScheme):], nil
 	}

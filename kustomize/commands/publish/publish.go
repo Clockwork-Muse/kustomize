@@ -1,169 +1,158 @@
-// Copyright 2019 The Kubernetes Authors.
+// Copyright 2025 The Kubernetes Authors.
 // SPDX-License-Identifier: Apache-2.0
 
 package publish
 
-// import (
-// 	"context"
-// 	"errors"
-// 	"fmt"
-// 	"log"
-// 	"path/filepath"
-// 	"strings"
-// 	"time"
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 
-// 	"github.com/spf13/cobra"
-// 	"k8s.io/utils/clock"
-// 	"sigs.k8s.io/kustomize/kustomize/v5/commands/internal/kustfile"
-// 	"sigs.k8s.io/kustomize/kyaml/filesys"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/spf13/cobra"
+	"sigs.k8s.io/kustomize/api/konfig"
+	"sigs.k8s.io/kustomize/api/oci"
+	"sigs.k8s.io/kustomize/api/types"
+	"sigs.k8s.io/kustomize/kyaml/filesys"
+)
 
-// 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
-// 	oras "oras.land/oras-go/v2"
-// 	"oras.land/oras-go/v2/content/file"
-// 	"oras.land/oras-go/v2/content/memory"
-// 	"oras.land/oras-go/v2/content/oci"
-// )
+// NewCmdPublish returns a new publish command.
+func NewCmdPublish(fSys filesys.FileSystem) *cobra.Command {
+	var path string
+	var source string
+	var revision string
+	var exclude []string
 
-// type publishOptions struct {
-// 	registry  string
-// 	createdAt time.Time
-// 	noVerify  bool
-// }
+	cmd := &cobra.Command{
+		Use:   "publish <registry/repository:tag> [registry/repository:tag...]",
+		Short: "[Alpha] Publishes a kustomization directory to an OCI registry",
+		Long: `[Alpha] Packages the kustomization directory and pushes it as an OCI
+artifact to one or more registry targets.
 
-// // NewCmdEdit returns an instance of 'edit' subcommand.
-// func NewCmdPublish(
-// 	fSys filesys.FileSystem,
-// 	clock clock.PassiveClock,
-// ) *cobra.Command {
-// 	var o publishOptions
+By default, the current working directory is published. Use --path to
+specify a different kustomization directory.
 
-// 	cmd := &cobra.Command{
-// 		Use:   "publish",
-// 		Short: "Publishes a kustomization resource to an OCI registry",
-// 		Long:  "",
-// 		Example: `
-// 		publish <registry>
-// `,
-// 		RunE: func(cmd *cobra.Command, args []string) error {
-// 			err := o.Validate(clock, args)
-// 			if err != nil {
-// 				return err
-// 			}
-// 			return o.RunPublish(fSys)
-// 		},
+Targets must include an explicit tag (e.g. :v1.0.0). The artifact can then
+be referenced in other kustomization files as:
+  resources:
+  - oci://registry/repository:tag
+`,
+		Example: `
+# Publish current directory to a registry
+kustomize publish ghcr.io/myorg/my-app:v1.0.0
 
-// 		Args: cobra.MinimumNArgs(1),
-// 	}
+# Publish a specific directory
+kustomize publish ghcr.io/myorg/my-app:v1.0.0 --path ./overlays/prod
 
-// 	// cmd.Flags().StringVar(
-// 	// 	&o.createdAt,
-// 	// 	"created-at",
-// 	// 	"",
-// 	// 	"The timestamp of the published artifact.  It must be supplied for reproducible builds.  Defaults to the current timestamp.",
-// 	// )
-// 	cmd.Flags().BoolVar(
-// 		&o.noVerify,
-// 		"no-verify",
-// 		false,
-// 		"skip validation for resources",
-// 	)
-// 	return cmd
-// }
+# Publish to multiple registries
+kustomize publish ghcr.io/myorg/my-app:v1.0.0 docker.io/myorg/my-app:v1.0.0 --path ./base
+`,
+		SilenceUsage: true,
+		Args:         cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPublish(fSys, path, source, revision, exclude, args)
+		},
+	}
 
-// // Validate validates addResource command.
-// func (o *publishOptions) Validate(clock clock.PassiveClock, args []string) error {
-// 	if len(args) == 0 {
-// 		return errors.New("must specify a registry")
-// 	}
-// 	o.registry = args[0]
+	cmd.Flags().StringVarP(&path, "path", "p", "",
+		"Path to the kustomization directory to publish. Defaults to current working directory.")
+	cmd.Flags().StringVar(&source, "source", "",
+		"Source URL to record in OCI annotations (org.opencontainers.image.source).")
+	cmd.Flags().StringVar(&revision, "revision", "",
+		"Revision to record in OCI annotations (org.opencontainers.image.revision).")
+	cmd.Flags().StringArrayVar(&exclude, "exclude", nil,
+		"File patterns to exclude from the artifact (gitignore format, repeatable).")
 
-// 	o.createdAt = clock.Now()
+	return cmd
+}
 
-// 	// if o.createdAt == "" {
-// 	// 	o.createdAt = time.Now().Format(time.RFC3339)
-// 	// } else {
-// 	// 	parsed, err := time.Parse("", o.createdAt)
-// 	// 	if err != nil {
-// 	// 		return err
-// 	// 	}
-// 	// 	o.createdAt = parsed.Format(time.RFC3339)
-// 	// }
-// 	return nil
-// }
+func runPublish(fSys filesys.FileSystem, path string, source string, revision string, exclude []string, args []string) error {
+	// Parse target references
+	targets := make([]name.Tag, 0, len(args))
+	for _, arg := range args {
+		tag, err := name.NewTag(arg)
+		if err != nil {
+			return fmt.Errorf("invalid target %q: %w", arg, err)
+		}
+		if tag.TagStr() == "latest" {
+			return fmt.Errorf("target %q must specify an explicit tag (not latest)", arg)
+		}
+		targets = append(targets, tag)
+	}
 
-// // RunAddResource runs addResource command (do real work).
-// func (o *publishOptions) RunPublish(fSys filesys.FileSystem) error {
-// 	mf, err := kustfile.NewKustomizationFile(fSys)
-// 	if err != nil {
-// 		return err
-// 	}
+	// Resolve the kustomization directory
+	dir := path
+	if dir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("getting working directory: %w", err)
+		}
+		dir = cwd
+	}
 
-// 	kustomization, err := mf.Read()
-// 	if err != nil {
-// 		return err
-// 	}
+	// Make path absolute
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolving path %q: %w", dir, err)
+	}
 
-// 	var dir string = filepath.Dir(mf.GetPath())
+	if !fSys.IsDir(absDir) {
+		return fmt.Errorf("path %q is not a directory", dir)
+	}
 
-// 	fs, err := file.New("")
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer fs.Close()
+	// Find and load kustomization file (optional — if present, it will be validated)
+	kustomization, _ := loadKustomization(fSys, absDir)
 
-// 	ctx := context.Background()
-// 	fileDescriptor, err := fs.Add(ctx, ".", "", dir)
-// 	if err != nil {
-// 		return err
-// 	}
+	// Push to registries
+	opts := &oci.PushOptions{}
+	opts.SetTargets(targets)
+	if kustomization != nil {
+		opts.SetKustomization(kustomization)
+	}
+	opts.SetFileSystem(fSys)
+	opts.SetRoot(filesys.ConfirmedDir(absDir))
 
-// 	d := memory.New()
+	// Set OCI annotations
+	annotations := make(map[string]string)
+	if source != "" {
+		annotations["org.opencontainers.image.source"] = source
+	}
+	if revision != "" {
+		annotations["org.opencontainers.image.revision"] = revision
+	}
+	if len(annotations) > 0 {
+		opts.SetAnnotations(annotations)
+	}
+	if len(exclude) > 0 {
+		opts.SetExcludePatterns(exclude)
+	}
 
-// 	f, err := fSys.Open("")
-// 	defer f.Close()
+	if err := oci.Push(opts); err != nil {
+		return err
+	}
 
-// 	d.Push(ctx, fileDescriptor, f)
+	for _, tag := range targets {
+		log.Printf("Published to %s\n", tag.Name())
+	}
+	return nil
+}
 
-// 	opts := oras.PackManifestOptions{
-// 		Layers: []v1.Descriptor{
-// 			fileDescriptor,
-// 		},
-// 		ManifestAnnotations: map[string]string{
-// 			"org.opencontainers.image.created": o.createdAt.Format(time.RFC3339),
-// 		},
-// 	}
-
-// 	artifactType := fmt.Sprintf("application/vnd.%s+%s", strings.ToLower(strings.ReplaceAll(kustomization.APIVersion, "/", ".")), strings.ToLower(kustomization.Kind))
-// 	manifestDescriptor, err := oras.PackManifest(ctx, fs, oras.PackManifestVersion1_1, artifactType, opts)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	tag := "latest"
-// 	if err = fs.Tag(ctx, manifestDescriptor, tag); err != nil {
-// 		return err
-// 	}
-
-// 	dst, err := oci.New(o.registry)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	// }
-// 	// reg, err := remote.NewRegistry(o.registry)
-// 	// reg.PlainHTTP = true
-
-// 	// dst, err := reg.Repository(ctx, "destination")
-// 	// if err != nil {
-// 	// 	panic(err) // Handle error
-// 	// }
-
-// 	desc, err := oras.Copy(ctx, fs, tag, dst, tag, oras.DefaultCopyOptions)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	log.Printf(`SUCCESS: published %s:%s@%s\n`, o.registry, tag, desc.Digest)
-
-// 	return nil
-// }
+// loadKustomization finds and reads a kustomization file in the given directory.
+func loadKustomization(fSys filesys.FileSystem, dir string) (*types.Kustomization, error) {
+	for _, kfilename := range konfig.RecognizedKustomizationFileNames() {
+		kpath := filepath.Join(dir, kfilename)
+		if fSys.Exists(kpath) {
+			content, err := fSys.ReadFile(kpath)
+			if err != nil {
+				return nil, fmt.Errorf("reading kustomization file: %w", err)
+			}
+			var kust types.Kustomization
+			if err := kust.Unmarshal(content); err != nil {
+				return nil, fmt.Errorf("parsing kustomization file: %w", err)
+			}
+			return &kust, nil
+		}
+	}
+	return nil, fmt.Errorf("no kustomization file found in %q", dir)
+}

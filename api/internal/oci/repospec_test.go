@@ -304,7 +304,6 @@ func TestNewRepoSpecFromUrl_Smoke(t *testing.T) {
 			// they are tested in TestParseQuery.
 			rs.raw = ""
 			rs.Dir = ""
-			rs.Timeout = 0
 			assert.Equal(t, &tc.repoSpec, rs) //nolint:gosec
 		})
 	}
@@ -313,5 +312,79 @@ func TestNewRepoSpecFromUrl_Smoke(t *testing.T) {
 func TestNewRepoSpecFromURL_DefaultQueryParams(t *testing.T) {
 	repoSpec, err := NewRepoSpecFromURL("oci://ghcr.com/org:latest")
 	require.NoError(t, err)
-	require.Equal(t, defaultTimeout, repoSpec.Timeout)
+	require.NotNil(t, repoSpec)
+}
+
+
+func TestNewRepoSpecFromURL_SemverConstraint(t *testing.T) {
+	tests := []struct {
+		name       string
+		url        string
+		constraint string
+		repoStr    string
+	}{
+		{
+			name:       "greater than or equal",
+			url:        "oci://ghcr.io/org/repo:>=1.0.0",
+			constraint: ">=1.0.0",
+			repoStr:    "ghcr.io/org/repo",
+		},
+		{
+			name:       "range constraint",
+			url:        "oci://ghcr.io/org/repo:>=1.0.0 <2.0.0",
+			constraint: ">=1.0.0 <2.0.0",
+			repoStr:    "ghcr.io/org/repo",
+		},
+		{
+			name:       "tilde constraint",
+			url:        "oci://ghcr.io/org/repo:~1.2.0",
+			constraint: "~1.2.0",
+			repoStr:    "ghcr.io/org/repo",
+		},
+		{
+			name:       "caret constraint",
+			url:        "oci://ghcr.io/org/repo:^1.2.0",
+			constraint: "^1.2.0",
+			repoStr:    "ghcr.io/org/repo",
+		},
+		{
+			name:       "wildcard constraint",
+			url:        "oci://ghcr.io/org/repo:1.x",
+			constraint: "1.x",
+			repoStr:    "ghcr.io/org/repo",
+		},
+		{
+			name:       "pipe or constraint",
+			url:        "oci://ghcr.io/org/repo:>=1.0.0|>=2.0.0",
+			constraint: ">=1.0.0|>=2.0.0",
+			repoStr:    "ghcr.io/org/repo",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, err := NewRepoSpecFromURL(tc.url)
+			require.NoError(t, err)
+			require.Equal(t, tc.constraint, spec.SemverConstraint)
+			require.Equal(t, tc.repoStr, spec.Reference.Context().String())
+		})
+	}
+}
+
+func TestNewRepoSpecFromURL_LiteralTagNotSemverConstraint(t *testing.T) {
+	// Normal tags should NOT be treated as semver constraints
+	tests := []string{
+		"oci://ghcr.io/org/repo:v1.0.0",
+		"oci://ghcr.io/org/repo:latest",
+		"oci://ghcr.io/org/repo:sha-abc123",
+		"oci://ghcr.io/org/repo:2024-01-01",
+	}
+
+	for _, url := range tests {
+		t.Run(url, func(t *testing.T) {
+			spec, err := NewRepoSpecFromURL(url)
+			require.NoError(t, err)
+			require.Empty(t, spec.SemverConstraint)
+		})
+	}
 }

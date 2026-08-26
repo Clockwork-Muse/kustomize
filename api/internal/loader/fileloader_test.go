@@ -487,7 +487,7 @@ whatever
 func TestNewLoaderAtOciPull(t *testing.T) {
 	require := require.New(t)
 
-	rootURL := "github.com/someOrg/someRepo"
+	rootURL := "ghcr.io/someorg/somerepo"
 	pathInRepo := "foo/base"
 	url := rootURL + "//" + pathInRepo
 	coRoot := "/tmp"
@@ -630,7 +630,7 @@ func TestLoaderDisallowsLocalBaseFromOciRemoteOverlay(t *testing.T) {
 	// remote K would be deliberately designed to phish
 	// for local K's.
 	repoSpec, err := oci.NewRepoSpecFromURL(
-		"oci://github.com/someOrg/someRepo//foo/overlay")
+		"oci://ghcr.io/someorg/somerepo//foo/overlay")
 	require.NoError(err)
 
 	l1, err = newLoaderAtOciPull(
@@ -679,7 +679,7 @@ func TestLoaderDisallowsRemoteBaseExitOciRepo(t *testing.T) {
 	base := filepath.Join(repo, "base")
 	require.NoError(t, os.Symlink(dir.String(), base))
 
-	repoSpec, err := oci.NewRepoSpecFromURL("oci://github.com/org/repo//base")
+	repoSpec, err := oci.NewRepoSpecFromURL("oci://ghcr.io/someorg/somerepo//base")
 	require.NoError(t, err)
 
 	_, err = newLoaderAtOciPull(repoSpec, fSys, nil, oci.DoNothingPuller(filesys.ConfirmedDir(repo)))
@@ -722,7 +722,7 @@ func TestLocalLoaderReferencingOciBase(t *testing.T) {
 		nil, oci.DoNothingPuller(filesys.ConfirmedDir(pullRoot)))
 	require.Equal(topDir, l1.Root())
 
-	l2, err := l1.New("oci://github.com/someOrg/someRepo//foo/base")
+	l2, err := l1.New("oci://ghcr.io/someorg/somerepo//foo/base")
 	require.NoError(err)
 	repo := l2.Repo()
 	require.Equal(pullRoot, repo)
@@ -763,7 +763,7 @@ func TestOciRepoDirectCycleDetection(t *testing.T) {
 	l1 := newLoaderAtConfirmedDir(
 		RestrictionRootOnly, filesys.ConfirmedDir(topDir), fSys, nil,
 		nil, oci.DoNothingPuller(filesys.ConfirmedDir(cloneRoot)))
-	p1 := "oci://github.com/someOrg/someRepo/foo"
+	p1 := "oci://ghcr.io/someorg/somerepo/foo"
 	rs1, err := oci.NewRepoSpecFromURL(p1)
 	require.NoError(err)
 
@@ -813,8 +813,8 @@ func TestOciRepoIndirectCycleDetection(t *testing.T) {
 		RestrictionRootOnly, filesys.ConfirmedDir(topDir), fSys, nil,
 		nil, oci.DoNothingPuller(filesys.ConfirmedDir(pullRoot)))
 
-	p1 := "oci://github.com/someOrg/someRepo1"
-	p2 := "oci://github.com/someOrg/someRepo2"
+	p1 := "oci://ghcr.io/someorg/somerepo1"
+	p2 := "oci://ghcr.io/someorg/somerepo2"
 
 	l1, err := l0.New(p1)
 	require.NoError(err)
@@ -825,6 +825,56 @@ func TestOciRepoIndirectCycleDetection(t *testing.T) {
 	_, err = l2.New(p1)
 	require.Error(err)
 	require.Contains(err.Error(), "cycle detected")
+}
+
+func TestOciDifferentTagsNotACycle(t *testing.T) {
+	require := require.New(t)
+
+	topDir := "/cycles"
+	pullRoot := topDir + "/someClone"
+	fSys := filesys.MakeFsInMemory()
+	fSys.MkdirAll(topDir)
+	fSys.MkdirAll(pullRoot)
+
+	l0 := newLoaderAtConfirmedDir(
+		RestrictionRootOnly, filesys.ConfirmedDir(topDir), fSys, nil,
+		nil, oci.DoNothingPuller(filesys.ConfirmedDir(pullRoot)))
+
+	// Same repository, different tags — should NOT be a cycle
+	p1 := "oci://ghcr.io/someorg/somerepo:v1.0.0"
+	p2 := "oci://ghcr.io/someorg/somerepo:v2.0.0"
+
+	l1, err := l0.New(p1)
+	require.NoError(err)
+
+	// Different tag of same repo should be allowed
+	_, err = l1.New(p2)
+	require.NoError(err)
+}
+
+func TestGitDifferentRefsNotACycle(t *testing.T) {
+	require := require.New(t)
+
+	topDir := "/cycles"
+	cloneRoot := topDir + "/someClone"
+	fSys := filesys.MakeFsInMemory()
+	require.NoError(fSys.MkdirAll(topDir))
+	require.NoError(fSys.MkdirAll(cloneRoot))
+	require.NoError(fSys.MkdirAll(cloneRoot + "/base"))
+
+	l0 := newLoaderAtConfirmedDir(
+		RestrictionRootOnly, filesys.ConfirmedDir(topDir), fSys,
+		nil, git.DoNothingCloner(filesys.ConfirmedDir(cloneRoot)), nil)
+
+	// Same repository, different refs — should NOT be a cycle
+	p1 := "https://github.com/org/repo.git?ref=main"
+	p2 := "https://github.com/org/repo.git?ref=develop"
+
+	l1, err := l0.New(p1)
+	require.NoError(err)
+
+	_, err = l1.New(p2)
+	require.NoError(err)
 }
 
 // Inspired by https://hassansin.github.io/Unit-Testing-http-client-in-Go

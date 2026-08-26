@@ -140,7 +140,7 @@ func NewLoaderOrDie(
 		log.Fatalf("unable to make loader at '%s'; %v", path, err)
 	}
 	return newLoaderAtConfirmedDir(
-		lr, root, fSys, nil, git.ClonerUsingGitExec, nil)
+		lr, root, fSys, nil, git.ClonerUsingGitExec, oci.PullUsingOciManifest)
 }
 
 // newLoaderAtConfirmedDir returns a new FileLoader with given root.
@@ -283,8 +283,15 @@ func newLoaderAtGitClone(
 func newLoaderAtOciPull(
 	repoSpec *oci.RepoSpec, fSys filesys.FileSystem,
 	referrer *FileLoader, puller oci.Puller) (ifc.Loader, error) {
+	if puller == nil {
+		puller = oci.PullUsingOciManifest
+	}
 	cleaner := repoSpec.Cleaner(fSys)
-	err := puller(repoSpec, fSys, referrer.http)
+	var httpClient *http.Client
+	if referrer != nil {
+		httpClient = referrer.http
+	}
+	err := puller(repoSpec, fSys, httpClient)
 	if err != nil {
 		cleaner()
 		return nil, err
@@ -394,14 +401,11 @@ func (fl *FileLoader) errIfArgEqualOrHigher(
 	return fl.referrer.errIfArgEqualOrHigher(candidateRoot)
 }
 
-// TODO(monopole): Distinguish branches?
-// I.e. Allow a distinction between git URI with
-// path foo and tag bar and a git URI with the same
-// path but a different tag?
+// errIfRepoCycle detects if we're about to re-enter the same git repository
+// and path. Two references to the same repo with different branches/tags are
+// allowed because they produce different content.
 func (fl *FileLoader) errIfRepoCycle(newRepoSpec *git.RepoSpec) error {
-	// TODO(monopole): Use parsed data instead of Raw().
-	if fl.repoSpec != nil &&
-		strings.HasPrefix(fl.repoSpec.Raw(), newRepoSpec.Raw()) {
+	if fl.repoSpec != nil && gitRepoSpecsOverlap(fl.repoSpec, newRepoSpec) {
 		return fmt.Errorf(
 			"cycle detected: URI '%s' referenced by previous URI '%s'",
 			newRepoSpec.Raw(), fl.repoSpec.Raw())
@@ -412,14 +416,27 @@ func (fl *FileLoader) errIfRepoCycle(newRepoSpec *git.RepoSpec) error {
 	return fl.referrer.errIfRepoCycle(newRepoSpec)
 }
 
-// TODO(monopole): Distinguish tags/digests?
-// I.e. Allow a distinction between oci artifacts with
-// path foo and tag bar and a URI with the same
-// path but a different tag/digest?
+// gitRepoSpecsOverlap returns true if both specs refer to the same repository,
+// same ref (branch/tag), and one path contains or equals the other.
+func gitRepoSpecsOverlap(existing, candidate *git.RepoSpec) bool {
+	if existing.Host != candidate.Host {
+		return false
+	}
+	if existing.RepoPath != candidate.RepoPath {
+		return false
+	}
+	if existing.Ref != candidate.Ref {
+		return false // different branch/tag = different content
+	}
+	// Same repo+ref: cycle if paths overlap (one is prefix of the other)
+	return pathsOverlap(existing.KustRootPath, candidate.KustRootPath)
+}
+
+// errIfOciRepoCycle detects if we're about to re-enter the same OCI artifact.
+// Two references to the same repository with different tags or digests are
+// allowed because they produce different content.
 func (fl *FileLoader) errIfOciRepoCycle(newRepoSpec *oci.RepoSpec) error {
-	// TODO(monopole): Use parsed data instead of Raw().
-	if fl.ociSpec != nil &&
-		strings.HasPrefix(fl.ociSpec.Raw(), newRepoSpec.Raw()) {
+	if fl.ociSpec != nil && ociRepoSpecsOverlap(fl.ociSpec, newRepoSpec) {
 		return fmt.Errorf(
 			"cycle detected: URI '%s' referenced by previous URI '%s'",
 			newRepoSpec.Raw(), fl.ociSpec.Raw())
@@ -428,6 +445,39 @@ func (fl *FileLoader) errIfOciRepoCycle(newRepoSpec *oci.RepoSpec) error {
 		return nil
 	}
 	return fl.referrer.errIfOciRepoCycle(newRepoSpec)
+}
+
+// ociRepoSpecsOverlap returns true if both specs refer to the same OCI artifact.
+// Same repository + same tag/digest + overlapping kust root paths = cycle.
+func ociRepoSpecsOverlap(existing, candidate *oci.RepoSpec) bool {
+	if existing.Reference.Context().String() != candidate.Reference.Context().String() {
+		return false
+	}
+	if existing.Reference.Identifier() != candidate.Reference.Identifier() {
+		return false // different tag/digest = different content
+	}
+	// Same artifact: cycle if paths overlap (one is prefix of the other)
+	return pathsOverlap(existing.KustRootPath, candidate.KustRootPath)
+}
+
+// pathsOverlap returns true if one path is a prefix of the other (or they're equal).
+// Uses path separator awareness to avoid false matches (e.g. "foo/bar" vs "foo/barbaz").
+func pathsOverlap(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if a == "" || b == "" {
+		// Empty path means repo root — always overlaps
+		return true
+	}
+	// Ensure prefix comparison respects path boundaries
+	if strings.HasPrefix(a, b) {
+		return len(a) == len(b) || a[len(b)] == '/'
+	}
+	if strings.HasPrefix(b, a) {
+		return len(b) == len(a) || b[len(a)] == '/'
+	}
+	return false
 }
 
 // Load returns the content of file at the given path,
