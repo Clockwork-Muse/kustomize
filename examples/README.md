@@ -31,6 +31,8 @@ Basic Usage
 
   * [remote target](remoteBuild.md) - Building a kustomization from a github URL
 
+  * [OCI registry](ociRegistry.md) - Pulling and publishing kustomizations via OCI registries
+
   * [json patch](jsonpatch.md) - Apply a json patch in a kustomization
 
   * [patch multiple objects](patchMultipleObjects.md) - Apply a patch to multiple objects
