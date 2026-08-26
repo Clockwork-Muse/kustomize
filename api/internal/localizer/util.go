@@ -11,6 +11,7 @@ import (
 
 	"sigs.k8s.io/kustomize/api/ifc"
 	"sigs.k8s.io/kustomize/api/internal/git"
+	"sigs.k8s.io/kustomize/api/internal/oci"
 	"sigs.k8s.io/kustomize/kyaml/errors"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
 )
@@ -103,8 +104,19 @@ func urlBase(url string) string {
 	return cleaned[i+1:]
 }
 
-// hasRef checks if repoURL has ref query string parameter
+// hasRef checks if repoURL has ref query string parameter (for git) or a tag/digest (for OCI)
 func hasRef(repoURL string) bool {
+	// Try OCI first
+	if ociSpec, err := oci.NewRepoSpecFromURL(repoURL); err == nil {
+		// OCI references parsed by go-containerregistry always have at least a default tag.
+		// We check that it's not just the default "latest" tag (which is implicit).
+		ref := ociSpec.Reference
+		if ref == nil {
+			return false
+		}
+		return ref.Identifier() != "latest"
+	}
+	// Fall back to git
 	repoSpec, err := git.NewRepoSpecFromURL(repoURL)
 	if err != nil {
 		log.Fatalf("unable to parse validated root url: %s", err)
@@ -186,6 +198,35 @@ func locRootPath(rootURL, repoDir string, root filesys.ConfirmedDir, fSys filesy
 		host,
 		filepath.Join(string(filepath.Separator), filepath.FromSlash(localRepoPath)),
 		filepath.FromSlash(repoSpec.Ref),
+		inRepo), nil
+}
+
+// locOciRootPath returns the relative localized path for a validated OCI root URL.
+// The path is structured as: localized-files/{registry}/{repository}/{tag-or-digest}/{path-in-repo}
+func locOciRootPath(rootURL string, repoDir string, root filesys.ConfirmedDir, fSys filesys.FileSystem) (string, error) {
+	ociSpec, err := oci.NewRepoSpecFromURL(rootURL)
+	if err != nil {
+		log.Panicf("cannot parse validated OCI url %q: %s", rootURL, err)
+	}
+	repo, err := filesys.ConfirmDir(fSys, repoDir)
+	if err != nil {
+		log.Panicf("unable to establish validated OCI pull location %q: %s", repoDir, err)
+	}
+	// calculate from copy to straighten symlinks
+	inRepo, err := filepath.Rel(repo.String(), root.String())
+	if err != nil {
+		log.Panicf("cannot find path from %q to child directory %q: %s", repo, root, err)
+	}
+
+	ref := ociSpec.Reference
+	registry := ref.Context().RegistryStr()
+	repository := ref.Context().RepositoryStr()
+	identifier := ref.Identifier() // tag or digest
+
+	return filepath.Join(LocalizeDir,
+		registry,
+		filepath.FromSlash(repository),
+		identifier,
 		inRepo), nil
 }
 

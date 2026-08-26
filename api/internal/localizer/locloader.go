@@ -9,6 +9,7 @@ import (
 	"sigs.k8s.io/kustomize/api/ifc"
 	"sigs.k8s.io/kustomize/api/internal/git"
 	"sigs.k8s.io/kustomize/api/internal/loader"
+	"sigs.k8s.io/kustomize/api/internal/oci"
 	"sigs.k8s.io/kustomize/kyaml/errors"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
 )
@@ -48,6 +49,12 @@ func NewLoader(rawTarget string, rawScope string, rawNewDir string, fSys filesys
 	repoSpec, err := git.NewRepoSpecFromURL(rawTarget)
 	if err == nil && repoSpec.Ref == "" {
 		return nil, Args{}, errors.Errorf("localize remote root %q missing ref query string parameter", rawTarget)
+	}
+
+	// Check OCI targets require a tag or digest other than "latest"
+	ociSpec, ociErr := oci.NewRepoSpecFromURL(rawTarget)
+	if ociErr == nil && ociSpec.Reference.Identifier() == "latest" {
+		return nil, Args{}, errors.Errorf("localize remote OCI root %q must specify an explicit versioned tag or digest, not %q", rawTarget, "latest")
 	}
 
 	// for security, should enforce load restrictions

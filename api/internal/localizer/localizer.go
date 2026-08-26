@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/kustomize/api/ifc"
 	"sigs.k8s.io/kustomize/api/internal/generators"
 	"sigs.k8s.io/kustomize/api/internal/loader"
+	"sigs.k8s.io/kustomize/api/internal/oci"
 	"sigs.k8s.io/kustomize/api/internal/target"
 	"sigs.k8s.io/kustomize/api/provider"
 	"sigs.k8s.io/kustomize/api/resmap"
@@ -413,7 +414,12 @@ func (lc *localizer) localizeRoot(path string) (string, error) {
 		if lc.fSys.Exists(lc.root.Join(LocalizeDir)) {
 			return "", errors.Errorf("%s already contains %s needed to store root %q", lc.root, LocalizeDir, path)
 		}
-		locPath, err = locRootPath(path, repo, root, lc.fSys)
+		// Determine whether this is an OCI or git remote root
+		if _, ociErr := oci.NewRepoSpecFromURL(path); ociErr == nil {
+			locPath, err = locOciRootPath(path, repo, root, lc.fSys)
+		} else {
+			locPath, err = locRootPath(path, repo, root, lc.fSys)
+		}
 		if err != nil {
 			return "", err
 		}

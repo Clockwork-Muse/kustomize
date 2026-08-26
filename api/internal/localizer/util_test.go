@@ -324,3 +324,67 @@ func TestCleanedRelativePath(t *testing.T) {
 	cleanedPath = cleanedRelativePath(fSys, "/root/", "test/../filetwo.yaml")
 	require.Equal(t, "filetwo.yaml", cleanedPath)
 }
+
+func TestHasRefOci(t *testing.T) {
+	for name, test := range map[string]struct {
+		url    string
+		hasRef bool
+	}{
+		"with_tag": {
+			url:    "oci://ghcr.io/org/repo:v1.0.0",
+			hasRef: true,
+		},
+		"with_digest": {
+			url:    "oci://ghcr.io/org/repo@sha256:94a00394bc5a8ef503fb59db0a7d0ae9e1110866e8aee8ba40cd864cea69ea1a",
+			hasRef: true,
+		},
+		"implicit_latest": {
+			url:    "oci://ghcr.io/org/repo",
+			hasRef: false,
+		},
+		"explicit_latest": {
+			url:    "oci://ghcr.io/org/repo:latest",
+			hasRef: false,
+		},
+		"with_path_and_tag": {
+			url:    "oci://ghcr.io/org/repo:v2.0.0//subdir",
+			hasRef: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, test.hasRef, hasRef(test.url))
+		})
+	}
+}
+
+func TestLocOciRootPath(t *testing.T) {
+	fSys := filesys.MakeFsInMemory()
+	repoDir := "/tmp/oci-pull-123"
+	require.NoError(t, fSys.MkdirAll(repoDir))
+	require.NoError(t, fSys.MkdirAll(repoDir+"/subdir"))
+
+	for name, test := range map[string]struct {
+		url      string
+		root     string
+		expected string
+	}{
+		"simple_tag": {
+			url:      "oci://ghcr.io/org/repo:v1.0.0",
+			root:     repoDir,
+			expected: filepath.Join(LocalizeDir, "ghcr.io", "org/repo", "v1.0.0", "."),
+		},
+		"with_subdir": {
+			url:      "oci://ghcr.io/org/repo:v1.0.0//subdir",
+			root:     repoDir + "/subdir",
+			expected: filepath.Join(LocalizeDir, "ghcr.io", "org/repo", "v1.0.0", "subdir"),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, err := filesys.ConfirmDir(fSys, test.root)
+			require.NoError(t, err)
+			result, err := locOciRootPath(test.url, repoDir, root, fSys)
+			require.NoError(t, err)
+			require.Equal(t, test.expected, result)
+		})
+	}
+}
